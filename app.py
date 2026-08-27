@@ -3,6 +3,11 @@ import sqlite3
 from datetime import datetime
 from summarizer import textrank_summarize
 
+# Thư viện hỗ trợ đọc file docx và pdf
+import docx
+from pypdf import PdfReader
+
+# Khởi tạo CSDL SQLite
 def init_db():
     conn = sqlite3.connect('history.db')
     c = conn.cursor()
@@ -26,6 +31,25 @@ def save_history(original_text, summary_text, method, num_sentences):
     conn.commit()
     conn.close()
 
+# Hàm trích xuất văn bản từ các định dạng file
+def extract_text_from_file(uploaded_file):
+    file_type = uploaded_file.name.split('.')[-1].lower()
+    text = ""
+    
+    if file_type == "txt":
+        text = uploaded_file.read().decode("utf-8", errors="ignore")
+    elif file_type == "docx":
+        doc = docx.Document(uploaded_file)
+        text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+    elif file_type == "pdf":
+        reader = PdfReader(uploaded_file)
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+                
+    return text
+
 init_db()
 
 st.set_page_config(page_title="Tóm Tắt Văn Bản Tự Động", layout="wide")
@@ -38,9 +62,16 @@ with tab1:
     col1, col2 = st.columns([1, 1])
     with col1:
         st.subheader("Nhập văn bản đầu vào")
-        uploaded_file = st.file_uploader("Tải tệp văn bản (.txt)", type=["txt"])
+        # Cho phép tải các file dạng txt, docx, pdf
+        uploaded_file = st.file_uploader("Tải tệp văn bản (.txt, .docx, .pdf)", type=["txt", "docx", "pdf"])
+        
+        input_text = ""
         if uploaded_file is not None:
-            input_text = uploaded_file.read().decode("utf-8")
+            input_text = extract_text_from_file(uploaded_file)
+            st.info(f"Đã đọc xong file **{uploaded_file.name}** ({len(input_text)} ký tự)")
+            # Xem trước văn bản từ file
+            with st.expander("Xem trước nội dung tệp"):
+                st.write(input_text)
         else:
             input_text = st.text_area("Hoặc dán văn bản vào đây:", height=250)
         
@@ -53,7 +84,7 @@ with tab1:
         st.subheader("Kết quả tóm tắt")
         if st.button("🚀 Thực hiện tóm tắt", type="primary"):
             if not input_text.strip():
-                st.warning("Vui lòng nhập nội dung văn bản!")
+                st.warning("Vui lòng nhập nội dung văn bản hoặc tải file lên!")
             else:
                 summary, sentences, ranked_sentences = textrank_summarize(
                     input_text, num_sentences=num_sentences, method=method.lower(), d=d_damping
