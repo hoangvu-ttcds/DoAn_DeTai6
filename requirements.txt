@@ -2,5 +2,6 @@ streamlit
 underthesea
 numpy
 networkx
+scipy
 python-docx
 pypdf
