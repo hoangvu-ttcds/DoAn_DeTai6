@@ -1,41 +1,34 @@
 import streamlit as st
-import sqlite3
 from datetime import datetime
 from summarizer import textrank_summarize
-
-# Thư viện hỗ trợ đọc file docx và pdf
 import docx
 from pypdf import PdfReader
+import chromadb
 
-# Khởi tạo CSDL SQLite
-def init_db():
-    conn = sqlite3.connect('history.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS summary_history 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  created_at TEXT, 
-                  original_text TEXT, 
-                  summary_text TEXT, 
-                  method TEXT, 
-                  num_sentences INTEGER)''')
-    conn.commit()
-    conn.close()
+# Khởi tạo Vector Database ChromaDB (lưu dữ liệu cục bộ dạng Persistent)
+@st.cache_resource
+def get_chroma_client():
+    return chromadb.PersistentClient(path="./chroma_db")
 
-def save_history(original_text, summary_text, method, num_sentences):
-    conn = sqlite3.connect('history.db')
-    c = conn.cursor()
-    c.execute('''INSERT INTO summary_history 
-                 (created_at, original_text, summary_text, method, num_sentences) 
-                 VALUES (?, ?, ?, ?, ?)''', 
-              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), original_text, summary_text, method, num_sentences))
-    conn.commit()
-    conn.close()
+client = get_chroma_client()
+collection = client.get_or_create_collection(name="summary_history")
 
-# Hàm trích xuất văn bản từ các định dạng file
+def save_to_chroma(original_text, summary_text, method, num_sentences):
+    doc_id = f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    collection.add(
+        documents=[summary_text],
+        metadatas=[{
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "original_text": original_text[:500], # Lưu xem trước 500 ký tự văn bản gốc
+            "method": method,
+            "num_sentences": num_sentences
+        }],
+        ids=[doc_id]
+    )
+
 def extract_text_from_file(uploaded_file):
     file_type = uploaded_file.name.split('.')[-1].lower()
     text = ""
-    
     if file_type == "txt":
         text = uploaded_file.read().decode("utf-8", errors="ignore")
     elif file_type == "docx":
@@ -47,29 +40,24 @@ def extract_text_from_file(uploaded_file):
             page_text = page.extract_text()
             if page_text:
                 text += page_text + "\n"
-                
     return text
-
-init_db()
 
 st.set_page_config(page_title="Tóm Tắt Văn Bản Tự Động", layout="wide")
 st.title("📝 HỆ THỐNG TÓM TẮT VĂN BẢN TIẾNG VIỆT (PAGERANK / TEXTRANK)")
 st.markdown("Đồ án môn học: Xử lý ngôn ngữ tự nhiên - Đề tài 6")
 
-tab1, tab2 = st.tabs(["🚀 Thực hiện tóm tắt", "📜 Lịch sử CSDL (SQLite)"])
+tab1, tab2 = st.tabs(["🚀 Thực hiện tóm tắt", "📜 Lịch sử CSDL Vector (ChromaDB)"])
 
 with tab1:
     col1, col2 = st.columns([1, 1])
     with col1:
         st.subheader("Nhập văn bản đầu vào")
-        # Cho phép tải các file dạng txt, docx, pdf
         uploaded_file = st.file_uploader("Tải tệp văn bản (.txt, .docx, .pdf)", type=["txt", "docx", "pdf"])
         
         input_text = ""
         if uploaded_file is not None:
             input_text = extract_text_from_file(uploaded_file)
             st.info(f"Đã đọc xong file **{uploaded_file.name}** ({len(input_text)} ký tự)")
-            # Xem trước văn bản từ file
             with st.expander("Xem trước nội dung tệp"):
                 st.write(input_text)
         else:
@@ -89,9 +77,10 @@ with tab1:
                 summary, sentences, ranked_sentences = textrank_summarize(
                     input_text, num_sentences=num_sentences, method=method.lower(), d=d_damping
                 )
-                save_history(input_text, summary, method, num_sentences)
+                # Lưu lịch sử vào Vector DB ChromaDB
+                save_to_chroma(input_text, summary, method, num_sentences)
                 
-                st.success("Tóm tắt hoàn tất & Đã lưu lịch sử vào CSDL!")
+                st.success("Tóm tắt hoàn tất & Đã lưu vào Vector Database (ChromaDB)!")
                 st.write(summary)
                 
                 st.divider()
@@ -100,16 +89,17 @@ with tab1:
                     st.write(f"**[Điểm PR: {score:.4f}]** - *Câu {idx+1}*: {sent}")
 
 with tab2:
-    st.subheader("Lịch sử các lần tóm tắt lưu trong SQLite")
-    conn = sqlite3.connect('history.db')
-    c = conn.cursor()
-    c.execute("SELECT id, created_at, method, num_sentences, summary_text FROM summary_history ORDER BY id DESC")
-    data = c.fetchall()
-    conn.close()
+    st.subheader("Lịch sử các lần tóm tắt lưu trong Vector Database (ChromaDB)")
+    results = collection.get()
     
-    if not data:
-        st.info("Chưa có dữ liệu lịch sử.")
+    if not results or not results["ids"]:
+        st.info("Chưa có dữ liệu lịch sử trong ChromaDB.")
     else:
-        for row in data:
-            with st.expander(f"Lần tóm tắt #{row[0]} | Thời gian: {row[1]} | Độ đo: {row[2]} | Số câu: {row[3]}"):
-                st.write(row[4])
+        for idx in range(len(results["ids"])):
+            doc_id = results["ids"][idx]
+            summary_content = results["documents"][idx]
+            meta = results["metadatas"][idx]
+            
+            with st.expander(f"Mã lưu trữ: {doc_id} | Thời gian: {meta.get('created_at')} | Độ đo: {meta.get('method')}"):
+                st.markdown(f"**Nội dung tóm tắt:**\n{summary_content}")
+                st.caption(f"Trích văn bản gốc: {meta.get('original_text')}...")
